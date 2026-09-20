@@ -1,0 +1,29 @@
+{
+    "compilerOptions": {
+        "target": "es2020",
+        "module": "node16",
+        "lib": ["ES2020"],
+        "strict": true,
+
+        // Fix for "hybrid module kind" error
+        "isolatedModules": true,
+
+        // Required for type-aware rules
+        "moduleResolution": "node16",
+        "resolveJsonModule": true,
+        "esModuleInterop": true,
+        "skipLibCheck": true,
+
+        // Ensures TS emits declarations for your rule code
+        "declaration": true,
+        "outDir": "dist",
+
+        // Allow importing your own files
+        "rootDir": "src",
+
+        // Allows you to use modern JS features inside the rule
+        "allowJs": false
+    },
+    "include": ["src/**/*.ts"],
+    "exclude": ["dist", "node_modules"]
+}

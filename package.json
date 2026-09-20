@@ -1,0 +1,44 @@
+{
+    "name": "eslint-plugin-yasm",
+    "version": "0.0.1",
+    "description": "Type-aware ESLint plugin to enforce exact optional property checks and prevent invalid undefined state updates in YASM (@mrnafisia/yasm).",
+    "main": "dist/index.js",
+    "types": "dist/index.d.ts",
+    "type": "commonjs",
+    "files": [
+        "dist"
+    ],
+    "scripts": {
+        "build": "tsc",
+        "checktype": "tsc --noEmit --skipLibCheck",
+        "prepack": "npm run build"
+    },
+    "keywords": [
+        "eslint",
+        "eslintplugin",
+        "eslint-plugin",
+        "yasm",
+        "react",
+        "state-management",
+        "typescript",
+        "exactOptionalPropertyTypes"
+    ],
+    "author": "Hasan Mir",
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/Hasan-Mir/eslint-plugin-yasm.git"
+    },
+    "dependencies": {
+        "@typescript-eslint/utils": "^8.67.0"
+    },
+    "devDependencies": {
+        "@typescript-eslint/parser": "^8.67.0",
+        "@typescript-eslint/rule-tester": "^8.48.1",
+        "typescript": "^5.9.3"
+    },
+    "peerDependencies": {
+        "eslint": ">=8.0.0",
+        "typescript": ">=4.8.0"
+    }
+}
