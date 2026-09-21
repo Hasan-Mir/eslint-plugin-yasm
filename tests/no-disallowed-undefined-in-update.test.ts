@@ -230,12 +230,27 @@ typeAwareRuleTester.run(
                 code: variableCode('const age = 42;\nupdateState({ age });'),
             },
             {
-                name: 'shorthand property of an `unknown` variable',
-                code: variableCode('const age: unknown = undefined;\nupdateState({ age });'),
+                name: 'shorthand property for an optional state property that explicitly allows undefined',
+                code: profileCode(`
+const bio: string | undefined = undefined;
+updateState({ bio });
+`),
             },
             {
-                name: 'shorthand property of an `any` variable',
-                code: variableCode('const age: any = undefined;\nupdateState({ age });'),
+                name: 'shorthand property for a required state property that explicitly allows undefined',
+                code: profileCode(`
+const note: string | undefined = undefined;
+updateState({ note });
+`),
+            },
+            {
+                name: 'shorthand nullable property inside a payload creator',
+                code: profileCode(`
+const note: string | undefined = undefined;
+updateState(prev => ({
+    note,
+}));
+`),
             },
             {
                 name: 'asserted undefined value',
@@ -247,22 +262,32 @@ typeAwareRuleTester.run(
                     'const patch: Partial<VariableState> = { age: undefined };\nupdateState(patch);'
                 ),
             },
+        ],
+        invalid: [
             {
-                // 🔒 `any` values are never treated as an `undefined` assignment, not even when they are inspected.
+                name: 'shorthand property of an `unknown` variable',
+                code: variableCode('const age: unknown = undefined;\nupdateState({ age });'),
+                errors: [errorFor('age', 'number', 'number | undefined')],
+            },
+            {
+                name: 'shorthand property of an `any` variable',
+                code: variableCode('const age: any = undefined;\nupdateState({ age });'),
+                errors: [errorFor('age', 'number', 'number | undefined')],
+            },
+            {
                 name: '`any` value next to an explicit undefined',
                 code: profileCode(
                     'declare const value: any;\nupdateState({ bio: undefined, title: value });'
                 ),
+                errors: [errorFor('title', 'string', 'string | undefined')],
             },
             {
-                // 🔒 `unknown` values are never treated as an `undefined` assignment, not even when they are inspected.
                 name: '`unknown` value next to an explicit undefined',
                 code: profileCode(
                     'declare const value: unknown;\nupdateState({ bio: undefined, title: value });'
                 ),
+                errors: [errorFor('title', 'string', 'string | undefined')],
             },
-        ],
-        invalid: [
             {
                 // 🔒 Regression: a shorthand property whose variable is typed `T | undefined` is reported.
                 name: 'shorthand property of a `number | undefined` variable',
@@ -288,13 +313,14 @@ setUpdate(prev => ({
                 errors: [errorFor('selectedCompanies', 'number[]', 'number[] | undefined')],
             },
             {
-                // 🔒 The type-aware pass uses the narrowed type of the value: this constant is narrowed to `1`,
-                // so only the literal `undefined` property is reported.
-                name: 'narrowed constant value next to an explicit undefined',
+                name: 'explicitly nullable constant value next to an explicit undefined',
                 code: variableCode(
                     'const age: number | undefined = 1;\nupdateState({ title: undefined, age });'
                 ),
-                errors: [errorFor('title', 'string', 'string | undefined')],
+                errors: [
+                    errorFor('title', 'string', 'string | undefined'),
+                    errorFor('age', 'number', 'number | undefined'),
+                ],
             },
             {
                 // 🔒 Non-narrowed values that allow `undefined` are reported next to a literal `undefined`.
@@ -650,6 +676,16 @@ record.updater({ bio: undefined });`),
 
 declare const updateMain: Updater<RecordState>;
 updateMain({ bio: undefined });`),
+        },
+        {
+            name: 'local `Updater` imported from an unrelated module',
+            code: recognitionCode(`
+import type { Updater as LocalUpdater } from './unrelated-updater';
+
+declare const unrelated: LocalUpdater<RecordState>;
+
+unrelated({ age: undefined });
+`),
         },
     ],
     invalid: [

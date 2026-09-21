@@ -52,6 +52,10 @@ const createFixtureProject = (): void => {
         path.join(yasmPackageDirectory, 'index.d.ts'),
         'export type Updater<S> = (update: Partial<S> | ((prev: S) => Partial<S>)) => S;\n'
     );
+    fs.writeFileSync(
+        path.join(FIXTURE_DIRECTORY, 'unrelated-updater.ts'),
+        `export type Updater<S> = (update: Partial<S>) => S;\n`
+    );
 };
 
 createFixtureProject();

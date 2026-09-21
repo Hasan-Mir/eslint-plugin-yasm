@@ -492,31 +492,34 @@ function resolveBaseStateType(
     const tsCallee = esTreeNodeToTSNodeMap.get(callNode.callee);
     if (tsCallee) {
         // Path 3: Inspect hook destructuring: const [state, setUpdate] = useAppState(...)
-        // Element 0 of the hook's returned tuple is guaranteed to be S.
         const calleeSymbol = checker.getSymbolAtLocation(tsCallee);
         if (calleeSymbol?.declarations) {
             for (const decl of calleeSymbol.declarations) {
                 if (ts.isBindingElement(decl) && ts.isArrayBindingPattern(decl.parent)) {
-                    const varDecl = decl.parent.parent;
-                    if (ts.isVariableDeclaration(varDecl) && varDecl.initializer) {
-                        const hookReturnType = checker.getTypeAtLocation(varDecl.initializer);
-                        const typeRef = hookReturnType as ts.TypeReference;
-                        if (typeRef.typeArguments && typeRef.typeArguments.length >= 1) {
-                            const firstTupleType = typeRef.typeArguments[0];
-                            if (isValidObjectType(firstTupleType)) {
-                                return firstTupleType;
+                    const arrayBinding = decl.parent;
+
+                    // Direct: Type of element 0 in the binding pattern itself [state, setUpdate]
+                    if (arrayBinding.elements.length >= 1) {
+                        const stateBindingElement = arrayBinding.elements[0];
+                        if (!ts.isOmittedExpression(stateBindingElement)) {
+                            const directStateType = checker.getTypeAtLocation(stateBindingElement);
+                            if (isValidObjectType(directStateType)) {
+                                return directStateType;
                             }
                         }
+                    }
 
-                        const prop0Symbol = checker.getPropertyOfType(hookReturnType, '0');
-                        if (prop0Symbol) {
-                            const propDecl =
-                                prop0Symbol.valueDeclaration ?? prop0Symbol.declarations?.[0];
-                            const prop0 = propDecl
-                                ? checker.getTypeOfSymbolAtLocation(prop0Symbol, propDecl)
-                                : checker.getTypeOfSymbolAtLocation(prop0Symbol, varDecl);
-                            if (prop0 && isValidObjectType(prop0)) {
-                                return prop0;
+                    const varDecl = arrayBinding.parent;
+                    if (ts.isVariableDeclaration(varDecl) && varDecl.initializer) {
+                        const hookReturnType = checker.getTypeAtLocation(varDecl.initializer);
+                        const typeArgs = checker.getTypeArguments(
+                            hookReturnType as ts.TypeReference
+                        );
+
+                        if (typeArgs && typeArgs.length >= 1) {
+                            const firstTupleType = typeArgs[0];
+                            if (isValidObjectType(firstTupleType)) {
+                                return firstTupleType;
                             }
                         }
                     }
@@ -597,10 +600,13 @@ function extractObjectExpressions(argNode: TSESTree.Node): TSESTree.ObjectExpres
 }
 
 function isValueUndefinedOrAllowsUndefined(
-    valueNode: TSESTree.Node,
+    propNode: TSESTree.Property,
     checker: ts.TypeChecker,
     esTreeNodeToTSNodeMap: ESTreeToTSNodeMap
 ): boolean {
+    const valueNode = propNode.value;
+
+    // 1. Literal undefined or void expression
     if (valueNode.type === AST_NODE_TYPES.Identifier && valueNode.name === 'undefined') {
         return true;
     }
@@ -609,34 +615,67 @@ function isValueUndefinedOrAllowsUndefined(
         return true;
     }
 
-    const tsNode = esTreeNodeToTSNodeMap.get(valueNode);
-    if (!tsNode) {
-        return false;
-    }
-
     let valType: ts.Type | undefined;
 
-    // 🔒 Handle ShorthandPropertyAssignment: { selectedCompanies }
-    // In TypeScript AST, `tsNode` is the identifier. To inspect the type of the variable
-    // in scope rather than the object property definition, use getShorthandAssignmentValueSymbol.
-    const shorthand = ts.isShorthandPropertyAssignment(tsNode)
-        ? tsNode
-        : ts.isShorthandPropertyAssignment(tsNode.parent)
-          ? tsNode.parent
-          : null;
+    // 2. Shorthand Property: { selectedCompanies }
+    if (propNode.shorthand) {
+        const tsProp = esTreeNodeToTSNodeMap.get(propNode);
+        if (tsProp && ts.isShorthandPropertyAssignment(tsProp)) {
+            const valueSymbol = checker.getShorthandAssignmentValueSymbol(tsProp);
+            if (valueSymbol) {
+                const decl = valueSymbol.valueDeclaration ?? valueSymbol.declarations?.[0];
+                if (decl && ts.isVariableDeclaration(decl)) {
+                    // Check if variable initializer was explicitly `undefined` or `void 0`
+                    if (
+                        decl.initializer &&
+                        ((ts.isIdentifier(decl.initializer) &&
+                            decl.initializer.text === 'undefined') ||
+                            ts.isVoidExpression(decl.initializer))
+                    ) {
+                        return true;
+                    }
 
-    if (shorthand) {
-        const valueSymbol = checker.getShorthandAssignmentValueSymbol(shorthand);
-        if (valueSymbol) {
-            const decl = valueSymbol.valueDeclaration ?? valueSymbol.declarations?.[0];
-            valType = decl
-                ? checker.getTypeOfSymbolAtLocation(valueSymbol, decl)
-                : checker.getTypeAtLocation(shorthand);
+                    // Check if explicit type annotation on the variable contains undefined
+                    if (decl.type && typeNodeExplicitlyIncludesUndefined(decl.type, checker)) {
+                        return true;
+                    }
+                }
+
+                valType = checker.getTypeOfSymbolAtLocation(valueSymbol, tsProp);
+            }
         }
     }
 
+    // 3. Standard Assignment: { selectedCompanies: selectedCompanies }
     if (!valType) {
-        valType = checker.getTypeAtLocation(tsNode);
+        const tsValueNode = esTreeNodeToTSNodeMap.get(valueNode);
+        if (!tsValueNode) {
+            return false;
+        }
+
+        const valueSymbol = checker.getSymbolAtLocation(tsValueNode);
+        if (valueSymbol) {
+            const decl = valueSymbol.valueDeclaration ?? valueSymbol.declarations?.[0];
+            if (decl && ts.isVariableDeclaration(decl)) {
+                if (
+                    decl.initializer &&
+                    ((ts.isIdentifier(decl.initializer) && decl.initializer.text === 'undefined') ||
+                        ts.isVoidExpression(decl.initializer))
+                ) {
+                    return true;
+                }
+
+                if (decl.type && typeNodeExplicitlyIncludesUndefined(decl.type, checker)) {
+                    return true;
+                }
+            }
+        }
+
+        valType = checker.getTypeAtLocation(tsValueNode);
+    }
+
+    if (!valType) {
+        return false;
     }
 
     if (
@@ -674,7 +713,7 @@ export const noDisallowedUndefinedInUpdate = createRule<Options, MessageIds>({
         ],
         messages: {
             disallowedUndefined:
-                "Property '{{key}}' does not permit 'undefined' in section state (type: '{{expectedType}}'). It is only allowed when defined as '{{key}}: {{suggestedType}}'.",
+                "Cannot assign 'undefined' to property '{{key}}' of type '{{expectedType}}'.\nSection state must explicitly include '| undefined' to permit this.\nOmit this property to leave it unchanged, or declare it as '{{suggestedType}}'.",
         },
     },
     defaultOptions: [{}],
@@ -760,7 +799,7 @@ export const noDisallowedUndefinedInUpdate = createRule<Options, MessageIds>({
                         }
 
                         const passesUndefined = isValueUndefinedOrAllowsUndefined(
-                            prop.value,
+                            prop,
                             checker,
                             esTreeNodeToTSNodeMap
                         );
