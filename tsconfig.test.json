@@ -1,0 +1,12 @@
+{
+    "extends": "./tsconfig.json",
+    "compilerOptions": {
+        // Tests live next to `src`, so the compilation root has to be the package root.
+        "rootDir": ".",
+        "outDir": "dist-tests",
+        "declaration": false,
+        "types": ["node"]
+    },
+    "include": ["src/**/*.ts", "tests/**/*.ts"],
+    "exclude": ["dist", "dist-tests", "node_modules"]
+}

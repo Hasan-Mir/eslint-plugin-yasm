@@ -18,8 +18,7 @@ export type Options = [
 export type MessageIds = 'disallowedUndefined';
 
 const createRule = ESLintUtils.RuleCreator(
-    name =>
-        `[https://github.com/Hasan-Mir/eslint-plugin-yasm#$](https://github.com/Hasan-Mir/eslint-plugin-yasm#$){name}`
+    name => `https://github.com/Hasan-Mir/eslint-plugin-yasm#${name}`
 );
 
 interface ESTreeToTSNodeMap {
@@ -32,6 +31,129 @@ const DEFAULT_HOOK_NAMES = [
     'useAppStateUpdater',
     'useYasmStateUpdater',
 ];
+
+const YASM_SOURCE_FILE_CACHE = new WeakMap<ts.SourceFile, boolean>();
+
+/**
+ * Determines whether a given TypeScript SourceFile is connected to YASM.
+ *
+ * This prevents false positives by distinguishing genuine YASM updater types
+ * from arbitrary, unrelated types named `Updater` across the project.
+ */
+function isYasmSourceFile(sourceFile: ts.SourceFile, hookNamesSet: Set<string>): boolean {
+    const cached = YASM_SOURCE_FILE_CACHE.get(sourceFile);
+    if (cached !== undefined) {
+        return cached;
+    }
+
+    const normalizedFileName = sourceFile.fileName.replace(/\\/g, '/');
+
+    // 1. File path check (node_modules or local workspace package)
+    if (
+        /\/node_modules\/(?:@mrnafisia\/)?yasm(?:\/|$)/i.test(normalizedFileName) ||
+        /(?:^|\/)(?:@mrnafisia\/)?yasm(?:\/|$)/i.test(normalizedFileName)
+    ) {
+        YASM_SOURCE_FILE_CACHE.set(sourceFile, true);
+        return true;
+    }
+
+    // 2. Inspect top-level module statements
+    for (const statement of sourceFile.statements) {
+        // 2.1. Direct package imports: import ... from '@mrnafisia/yasm'
+        if (ts.isImportDeclaration(statement) && ts.isStringLiteral(statement.moduleSpecifier)) {
+            const moduleName = statement.moduleSpecifier.text;
+
+            if (/^(?:@mrnafisia\/)?yasm(?:\/.*)?$/i.test(moduleName)) {
+                YASM_SOURCE_FILE_CACHE.set(sourceFile, true);
+                return true;
+            }
+        }
+
+        // 2.2. Named re-exports: export { useYasmState } from ...
+        if (
+            ts.isExportDeclaration(statement) &&
+            statement.exportClause &&
+            ts.isNamedExports(statement.exportClause)
+        ) {
+            for (const specifier of statement.exportClause.elements) {
+                if (hookNamesSet.has(specifier.name.text)) {
+                    YASM_SOURCE_FILE_CACHE.set(sourceFile, true);
+                    return true;
+                }
+            }
+        }
+
+        // 2.3. Hook function declarations
+        if (
+            ts.isFunctionDeclaration(statement) &&
+            statement.name &&
+            hookNamesSet.has(statement.name.text)
+        ) {
+            YASM_SOURCE_FILE_CACHE.set(sourceFile, true);
+            return true;
+        }
+
+        // 2.4. Hook variable/arrow declarations
+        if (ts.isVariableStatement(statement)) {
+            for (const declaration of statement.declarationList.declarations) {
+                if (ts.isIdentifier(declaration.name) && hookNamesSet.has(declaration.name.text)) {
+                    YASM_SOURCE_FILE_CACHE.set(sourceFile, true);
+                    return true;
+                }
+            }
+        }
+    }
+
+    YASM_SOURCE_FILE_CACHE.set(sourceFile, false);
+    return false;
+}
+
+/**
+ * Checks whether a type is a genuine YASM Updater type.
+ * Rejects local types declared inside functions or non-YASM files.
+ */
+function isYasmUpdaterType(
+    type: ts.Type,
+    checker: ts.TypeChecker,
+    hookNamesSet: Set<string>
+): boolean {
+    const typeSymbol = type.aliasSymbol ?? type.getSymbol();
+
+    if (!typeSymbol) {
+        return false;
+    }
+
+    let targetSymbol = typeSymbol;
+    if ((typeSymbol.flags & ts.SymbolFlags.Alias) !== 0) {
+        try {
+            targetSymbol = checker.getAliasedSymbol(typeSymbol);
+        } catch {
+            targetSymbol = typeSymbol;
+        }
+    }
+
+    if (targetSymbol.name !== 'Updater' && typeSymbol.name !== 'Updater') {
+        return false;
+    }
+
+    const declarations = [
+        ...(targetSymbol.getDeclarations() ?? []),
+        ...(typeSymbol.getDeclarations() ?? []),
+    ];
+
+    return declarations.some(declaration => {
+        // 🔒 Reject local types declared inside function bodies, blocks, or methods
+        if (
+            declaration.parent &&
+            !ts.isSourceFile(declaration.parent) &&
+            !ts.isModuleBlock(declaration.parent)
+        ) {
+            return false;
+        }
+
+        return isYasmSourceFile(declaration.getSourceFile(), hookNamesSet);
+    });
+}
 
 /**
  * Checks if a TypeScript Type allows `undefined` either directly or via a union.
@@ -49,6 +171,17 @@ function typeAllowsUndefined(type: ts.Type): boolean {
         return type.types.some(t => {
             return typeAllowsUndefined(t);
         });
+    }
+
+    if (type.isIntersection()) {
+        return type.types.some(t => {
+            return typeAllowsUndefined(t);
+        });
+    }
+
+    const constraint = type.getConstraint?.();
+    if (constraint && constraint !== type) {
+        return typeAllowsUndefined(constraint);
     }
 
     return false;
@@ -119,10 +252,6 @@ function checkPropertyAllowsUndefined(
 
     const { symbol, type: propType } = propInfo;
 
-    if (!typeAllowsUndefined(propType)) {
-        return { allowsUndefined: false, propType };
-    }
-
     const declarations = symbol.getDeclarations() ?? [];
     for (const decl of declarations) {
         if (ts.isPropertySignature(decl) || ts.isPropertyDeclaration(decl)) {
@@ -136,7 +265,15 @@ function checkPropertyAllowsUndefined(
                 }
                 return { allowsUndefined: true, propType };
             }
+
+            if (decl.type && typeNodeExplicitlyIncludesUndefined(decl.type, checker)) {
+                return { allowsUndefined: true, propType };
+            }
         }
+    }
+
+    if (!typeAllowsUndefined(propType)) {
+        return { allowsUndefined: false, propType };
     }
 
     return { allowsUndefined: true, propType };
@@ -230,9 +367,9 @@ function isYasmUpdaterCallee(
         return false;
     }
 
-    // 3. Fast Type check: type alias is `Updater`
+    // 3. Type check: only recognize `Updater` types declared by or connected to YASM.
     const calleeType = checker.getTypeAtLocation(tsCallee);
-    if (calleeType.aliasSymbol?.name === 'Updater' || calleeType.getSymbol()?.name === 'Updater') {
+    if (isYasmUpdaterType(calleeType, checker, hookNamesSet)) {
         return true;
     }
 
@@ -257,6 +394,20 @@ function isYasmUpdaterCallee(
                             if (hookName && hookNamesSet.has(hookName)) {
                                 return true;
                             }
+
+                            if (ts.isIdentifier(init.expression)) {
+                                const hookSymbol = checker.getSymbolAtLocation(init.expression);
+                                if (hookSymbol && (hookSymbol.flags & ts.SymbolFlags.Alias) !== 0) {
+                                    try {
+                                        const aliased = checker.getAliasedSymbol(hookSymbol);
+                                        if (aliased && hookNamesSet.has(aliased.name)) {
+                                            return true;
+                                        }
+                                    } catch {
+                                        // Ignore alias resolution errors
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -274,6 +425,20 @@ function isYasmUpdaterCallee(
 
                     if (hookName && hookNamesSet.has(hookName)) {
                         return true;
+                    }
+
+                    if (ts.isIdentifier(init.expression)) {
+                        const hookSymbol = checker.getSymbolAtLocation(init.expression);
+                        if (hookSymbol && (hookSymbol.flags & ts.SymbolFlags.Alias) !== 0) {
+                            try {
+                                const aliased = checker.getAliasedSymbol(hookSymbol);
+                                if (aliased && hookNamesSet.has(aliased.name)) {
+                                    return true;
+                                }
+                            } catch {
+                                // Ignore alias resolution errors
+                            }
+                        }
                     }
                 }
             }
@@ -297,7 +462,7 @@ function resolveBaseStateType(
         return null;
     }
 
-    // Fast Path 1: Payload creator function (prev => ({ ... }))
+    // Path 1: Payload creator function (prev => ({ ... }))
     if (
         firstArg.type === AST_NODE_TYPES.ArrowFunctionExpression ||
         firstArg.type === AST_NODE_TYPES.FunctionExpression
@@ -313,7 +478,7 @@ function resolveBaseStateType(
         }
     }
 
-    // Fast Path 2: Contextual type of the argument (Partial<S>)
+    // Path 2: Contextual type of the argument (Partial<S>)
     if (ts.isExpression(tsArgNode)) {
         const contextualType = checker.getContextualType(tsArgNode);
         if (contextualType) {
@@ -324,9 +489,42 @@ function resolveBaseStateType(
         }
     }
 
-    // Fast Path 3: Callee call signature inspection
     const tsCallee = esTreeNodeToTSNodeMap.get(callNode.callee);
     if (tsCallee) {
+        // Path 3: Inspect hook destructuring: const [state, setUpdate] = useAppState(...)
+        // Element 0 of the hook's returned tuple is guaranteed to be S.
+        const calleeSymbol = checker.getSymbolAtLocation(tsCallee);
+        if (calleeSymbol?.declarations) {
+            for (const decl of calleeSymbol.declarations) {
+                if (ts.isBindingElement(decl) && ts.isArrayBindingPattern(decl.parent)) {
+                    const varDecl = decl.parent.parent;
+                    if (ts.isVariableDeclaration(varDecl) && varDecl.initializer) {
+                        const hookReturnType = checker.getTypeAtLocation(varDecl.initializer);
+                        const typeRef = hookReturnType as ts.TypeReference;
+                        if (typeRef.typeArguments && typeRef.typeArguments.length >= 1) {
+                            const firstTupleType = typeRef.typeArguments[0];
+                            if (isValidObjectType(firstTupleType)) {
+                                return firstTupleType;
+                            }
+                        }
+
+                        const prop0Symbol = checker.getPropertyOfType(hookReturnType, '0');
+                        if (prop0Symbol) {
+                            const propDecl =
+                                prop0Symbol.valueDeclaration ?? prop0Symbol.declarations?.[0];
+                            const prop0 = propDecl
+                                ? checker.getTypeOfSymbolAtLocation(prop0Symbol, propDecl)
+                                : checker.getTypeOfSymbolAtLocation(prop0Symbol, varDecl);
+                            if (prop0 && isValidObjectType(prop0)) {
+                                return prop0;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Path 4: Callee signature inspection (extract state from (state: S) => Partial<S>)
         const calleeType = checker.getTypeAtLocation(tsCallee);
         for (const sig of calleeType.getCallSignatures()) {
             if (sig.parameters.length > 0) {
@@ -338,11 +536,25 @@ function resolveBaseStateType(
                     return directUnwrapped;
                 }
 
-                if (paramType.isUnion()) {
-                    for (const member of paramType.types) {
-                        const memberUnwrapped = unwrapPartialType(member);
-                        if (memberUnwrapped && isValidObjectType(memberUnwrapped)) {
-                            return memberUnwrapped;
+                const candidates = paramType.isUnion() ? paramType.types : [paramType];
+                for (const member of candidates) {
+                    const memberUnwrapped = unwrapPartialType(member);
+                    if (memberUnwrapped && isValidObjectType(memberUnwrapped)) {
+                        return memberUnwrapped;
+                    }
+
+                    for (const callSig of member.getCallSignatures()) {
+                        if (callSig.parameters.length > 0) {
+                            const stateParam = callSig.parameters[0];
+                            const decl = stateParam.valueDeclaration;
+                            const stateType = decl
+                                ? checker.getTypeOfSymbolAtLocation(stateParam, decl)
+                                : checker.getTypeAtLocation(
+                                      stateParam.declarations?.[0] ?? tsCallee
+                                  );
+                            if (stateType && isValidObjectType(stateType)) {
+                                return stateType;
+                            }
                         }
                     }
                 }
@@ -402,7 +614,31 @@ function isValueUndefinedOrAllowsUndefined(
         return false;
     }
 
-    const valType = checker.getTypeAtLocation(tsNode);
+    let valType: ts.Type | undefined;
+
+    // 🔒 Handle ShorthandPropertyAssignment: { selectedCompanies }
+    // In TypeScript AST, `tsNode` is the identifier. To inspect the type of the variable
+    // in scope rather than the object property definition, use getShorthandAssignmentValueSymbol.
+    const shorthand = ts.isShorthandPropertyAssignment(tsNode)
+        ? tsNode
+        : ts.isShorthandPropertyAssignment(tsNode.parent)
+          ? tsNode.parent
+          : null;
+
+    if (shorthand) {
+        const valueSymbol = checker.getShorthandAssignmentValueSymbol(shorthand);
+        if (valueSymbol) {
+            const decl = valueSymbol.valueDeclaration ?? valueSymbol.declarations?.[0];
+            valType = decl
+                ? checker.getTypeOfSymbolAtLocation(valueSymbol, decl)
+                : checker.getTypeAtLocation(shorthand);
+        }
+    }
+
+    if (!valType) {
+        valType = checker.getTypeAtLocation(tsNode);
+    }
+
     if (
         (valType.getFlags() & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.Never)) !==
         0
@@ -491,25 +727,7 @@ export const noDisallowedUndefinedInUpdate = createRule<Options, MessageIds>({
                     return;
                 }
 
-                // 3. Fast AST scan: check if any property actually passes undefined
-                const hasUndefinedAssignment = objectExpressions.some(obj => {
-                    return obj.properties.some(prop => {
-                        return (
-                            prop.type === AST_NODE_TYPES.Property &&
-                            !prop.computed &&
-                            ((prop.value.type === AST_NODE_TYPES.Identifier &&
-                                prop.value.name === 'undefined') ||
-                                (prop.value.type === AST_NODE_TYPES.UnaryExpression &&
-                                    prop.value.operator === 'void'))
-                        );
-                    });
-                });
-
-                if (!hasUndefinedAssignment) {
-                    return;
-                }
-
-                // 4. Resolve Base State Type S
+                // 3. Resolve Base State Type S
                 const baseStateType = resolveBaseStateType(
                     node,
                     firstArg,
@@ -520,7 +738,7 @@ export const noDisallowedUndefinedInUpdate = createRule<Options, MessageIds>({
                     return;
                 }
 
-                // 5. Verify properties
+                // 4. Verify properties
                 for (const objExpr of objectExpressions) {
                     for (const prop of objExpr.properties) {
                         if (prop.type !== AST_NODE_TYPES.Property || prop.computed) {

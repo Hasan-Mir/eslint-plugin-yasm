@@ -15,10 +15,9 @@ export const configs = {
 
     // Flat Config (ESLint 9+)
     'flat/recommended': {
+        files: ['**/*.{ts,tsx}'],
         plugins: {
-            get yasm() {
-                return { rules };
-            },
+            yasm: { rules },
         },
         rules: {
             'yasm/no-disallowed-undefined-in-update': 'error',

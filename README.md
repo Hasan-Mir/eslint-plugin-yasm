@@ -2,7 +2,7 @@
 
 > Type-aware ESLint plugin for [YASM (`@mrnafisia/yasm`)](https://github.com/MRNafisiA/yasm).
 
-Enforces compile-time exact optional property checks on YASM state updates, preventing silent runtime state corruption caused by passing explicit `undefined` to non-nullable fields.
+Enforces TypeScript-aware exact optional property checks on YASM state updates, preventing silent runtime state corruption caused by passing explicit `undefined` to non-nullable fields.
 
 ---
 
@@ -50,13 +50,14 @@ export default [
 ];
 ```
 
-Or extend the recommended flat preset directly:
+Or use the recommended flat preset with ESLint's `defineConfig`:
 
 ```js
+import { defineConfig } from 'eslint/config';
 import tsParser from '@typescript-eslint/parser';
 import yasmPlugin from 'eslint-plugin-yasm';
 
-export default [
+export default defineConfig([
     {
         files: ['**/*.{ts,tsx}'],
         languageOptions: {
@@ -65,12 +66,14 @@ export default [
                 project: true,
             },
         },
+        extends: [yasmPlugin.configs['flat/recommended']],
     },
-    yasmPlugin.configs['flat/recommended'],
-];
+]);
 ```
 
-### Legacy Config (`.eslintrc.js` — ESLint ≤ 8)
+### Legacy Config (`.eslintrc.js` — ESLint 8 / ESLint 9 legacy mode)
+
+> Legacy `.eslintrc` configuration is supported by ESLint 8 and can be used in ESLint 9 legacy mode. ESLint 10+ supports flat config only.
 
 ```js
 module.exports = {
